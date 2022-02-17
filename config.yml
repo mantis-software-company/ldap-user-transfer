@@ -1,0 +1,40 @@
+db:
+  host: "localhost"
+  user: "postgres"
+  password: "p4ssw0rd"
+  database: "myservice"
+  user_sql: | 
+    SELECT user_id::text, username, name, surname, concat(name, ' ', surname) as full_name, email FROM users
+  group_sql: |
+    select role_id::text as role_id from user_role_relation where user_id = %s
+  user_password_column: "temp_password" # Remove this line if don't want set password of users
+  user_pk: "user_id"
+  group_pk: "role_id"
+  cursor_fetch_size: "100"
+
+ldap:
+  address: "ldap://localhost:389"
+  base_dn: "dc=example,dc=org"
+  bind_dn: "cn=admin,dc=example,dc=org"
+  bind_password: "p4ssw0rd"
+  user_base: "ou=users,ou=my-service"
+  group_base: "ou=groups,ou=my-service"
+  user_classes:
+    - person
+    - organizationalPerson
+    - inetOrgPerson
+    - top
+
+mappings:
+  user_fields:
+    system_user_name: "uid"
+    name:
+      - cn
+      - givenName
+    surname: "sn"
+    email: "mail"
+    full_name: "displayName"
+
+  groups:
+    "1": "ADMINS"
+    "2": "REGULAR_USERS"

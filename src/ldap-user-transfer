@@ -1,0 +1,97 @@
+#!/usr/bin/env python
+
+import crypt
+import os
+
+import ldap
+import psycopg2
+import psycopg2.extras
+import yaml
+
+if not os.environ.get('LDAP_USER_TRANSFER_CONFIG'):
+    raise ValueError('LDAP_USER_TRANSFER_CONFIG environment variable not dedected!')
+
+with open(os.environ['LDAP_USER_TRANSFER_CONFIG'], 'r') as f:
+    config = yaml.safe_load(f)
+
+ldap_conn = ldap.initialize(config['ldap']['address'], bytes_mode=False)
+ldap_conn.simple_bind_s(config['ldap']['bind_dn'], config['ldap']['bind_password'])
+
+db_conn = psycopg2.connect(host=config['db']['host'], user=config['db']['user'], password=config['db']['password'],
+                           dbname=config['db']['database'])
+db_cursor = db_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+
+def create_password_hash(password):
+    _hash = crypt.crypt(
+        password,
+        crypt.mksalt(
+            crypt.METHOD_SHA512
+        )
+    )
+    return f"{{CRYPT}}{_hash}".encode('utf-8')
+
+
+def map_user_fields(_user):
+    d = dict()
+    mapping = config['mappings']['user_fields']
+    for key in mapping:
+        if type(mapping[key]) is list:
+            for subkey in mapping[key]:
+                d[subkey] = _user[key]
+        else:
+            d[mapping[key]] = _user[key]
+    return d
+
+
+def map_groups(_groups):
+    l = list()
+    mapping = config['mappings']['groups']
+    for group in _groups:
+        l.append(mapping[group[config['db']['group_pk']]])
+    return list(set(l))
+
+
+def add_user(user_dn, user_object):
+    entry = [
+        ('objectClass', [clazz.encode('utf-8') for clazz in config['ldap']['user_classes']])
+    ]
+    if 'user_password_column' in config['db']:
+        entry.append(
+            ('userPassword', create_password_hash(password=user_object.get(config['db']['user_password_column'])))
+        )
+    for field in user_object:
+        if user_object[field] and field != 'uid':
+            entry.append((field, user_object[field].encode('utf-8')))
+    try:
+        ldap_conn.add_s(user_dn, entry)
+    except ldap.ALREADY_EXISTS:
+        pass
+
+
+def assign_groups(user_dn, user_id):
+    db_cursor.execute(config['db']['group_sql'], (user_id,))
+    user_groups = db_cursor.fetchall()
+    groups = map_groups(user_groups)
+    for group in groups:
+        group_dn = f'cn={group},{config["ldap"]["group_base"]},{config["ldap"]["base_dn"]}'
+        ldap_conn.modify(group_dn, [(ldap.MOD_ADD, "uniqueMember", user_dn.encode("utf-8"))])
+
+
+db_cursor.execute(
+    f"DECLARE super_cursor BINARY CURSOR FOR {config['db']['user_sql']}"
+)
+while True:
+    db_cursor.execute(f"""FETCH {config["db"]["cursor_fetch_size"]} FROM super_cursor""")
+    users = db_cursor.fetchall()
+    if not users:
+        break
+
+    for user in users:
+        user_object = map_user_fields(user)
+        user_dn = f'uid={user_object["uid"]},{config["ldap"]["user_base"]},{config["ldap"]["base_dn"]}'
+        add_user(user_dn, user_object)
+        assign_groups(user_dn, user[config['db']['user_pk']])
+        print(f'User added: {user_dn}')
+
+
